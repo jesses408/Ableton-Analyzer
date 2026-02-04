@@ -208,3 +208,6 @@ __marimo__/
 
 # Claude
 .claude/
+
+# Windows null file artifact
+nul
