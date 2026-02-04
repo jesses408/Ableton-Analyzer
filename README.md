@@ -5,7 +5,7 @@
 This tool analyzes Ableton Live `.als` project files and produces two structured JSON reports:
 
 - **FULL** – Detailed analysis for human review and ChatGPT
-- **COMPACT_V2** – Token-optimized summary for Claude and other limited-context LLMs
+- **COMPACT** – Token-optimized summary for Claude and other limited-context LLMs
 
 It functions as a static analyzer for Ableton sessions, helping detect technical risks and enabling automated mix and loudness review.
 
@@ -154,7 +154,7 @@ For each run, two files are generated.
 
 Filename:
 
-*.full.audit.json
+*.full.json
 
 Contains:
 
@@ -176,11 +176,11 @@ Supports deep mix/loudness review.
 
 ---
 
-### 2. COMPACT_V2 Audit File
+### 2. COMPACT Audit File
 
 Filename:
 
-*.compact_v2.audit.json
+*.compact.json
 
 Contains:
 
@@ -326,9 +326,7 @@ and suggest optimization.
 
 ## Versioning
 
-Current version: 1.0.24
-
-Versions are tracked in the VERSION file and Git tags.
+Versions are tracked in the VERSION file, CHANGELOG.md, and Git tags.
 
 ---
 
@@ -340,6 +338,8 @@ No warranty.
 ---
 
 ## Author Notes
+
+Created by Jesse Schachter.
 
 This tool is designed to function as an automated
 quality gate for Ableton projects and an AI-assisted

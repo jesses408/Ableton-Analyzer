@@ -2,7 +2,7 @@
 """
 Ableton Live .als/.xml -> two outputs:
   1) FULL JSON (ChatGPT): detailed but pruned
-  2) COMPACT_V2 JSON (Claude): token-minimized schema with short keys
+  2) COMPACT JSON (Claude): token-minimized schema with short keys
 
 This version includes important FIXES for device naming + enabled/disabled accuracy:
 
@@ -33,6 +33,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+SCRIPT_VERSION = "1.0.25"
 
 # -----------------------------
 # IO helpers
@@ -2054,7 +2055,7 @@ def apply_deactivated_routing_impact_checks(tracks: List[Dict[str, Any]]) -> Non
 
 
 # -----------------------------
-# Compact v2 helpers (token-minimized)
+# Compact helpers (token-minimized)
 # -----------------------------
 
 def parse_routing_kind(s: Optional[str]) -> str:
@@ -2085,7 +2086,7 @@ def extract_track_ref_id(routing_str: Optional[str]) -> Optional[str]:
     return None
 
 
-def compact_v2_device(d: Dict[str, Any]) -> Dict[str, Any]:
+def compact_device(d: Dict[str, Any]) -> Dict[str, Any]:
     """
     SUPER small per-device dict for Claude.
     Keep only: tag, name, enabled, plugin_format, identifier, noop_guess, state hash.
@@ -2116,9 +2117,9 @@ def compact_v2_device(d: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def detect_compact_v2_issues(tr: Dict[str, Any]) -> List[str]:
+def detect_compact_issues(tr: Dict[str, Any]) -> List[str]:
     """
-    Issues list in compact v2 (short strings).
+    Issues list in compact (short strings).
     Important: "alldis" ONLY when all devices explicitly have e==False.
     """
     issues: List[str] = []
@@ -2169,13 +2170,13 @@ def detect_compact_v2_issues(tr: Dict[str, Any]) -> List[str]:
     return issues
 
 
-def compact_v2_track(t: Dict[str, Any]) -> Dict[str, Any]:
+def compact_track(t: Dict[str, Any]) -> Dict[str, Any]:
     flags = t.get("flags") or {}
     routing = t.get("routing") or {}
     mixer = t.get("mixer") or {}
 
     devs_full = t.get("devices") or []
-    devs = [compact_v2_device(d) for d in devs_full]
+    devs = [compact_device(d) for d in devs_full]
 
     ai = routing.get("audio_in")
     ao = routing.get("audio_out")
@@ -2225,7 +2226,7 @@ def compact_v2_track(t: Dict[str, Any]) -> Dict[str, Any]:
         src_ids = sorted(set(src_ids), key=lambda x: int(x) if x.isdigit() else x)
         tr["rb"] = {"d": int(t.get("routing_break_depth")), "s": src_ids or None}
 
-    tr["is"] = detect_compact_v2_issues(tr)
+    tr["is"] = detect_compact_issues(tr)
 
     # Extra issue labels (do not affect packed QC reasons)
     if t.get("routing_dead_bus") is True:
@@ -2237,7 +2238,7 @@ def compact_v2_track(t: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # -----------------------------
-# Build FULL + COMPACT_V2
+# Build FULL + COMPACT
 # -----------------------------
 
 
@@ -2387,6 +2388,7 @@ def build_full_report(in_path: str, root: ET.Element, tracks: List[Dict[str, Any
         out_tracks, pools = _dedupe_full_tracks(out_tracks)
 
     out_obj: Dict[str, Any] = {
+        "version": SCRIPT_VERSION,
         "input_file": os.path.abspath(in_path),
         "root_tag": root.tag,
         "track_count": len(out_tracks),
@@ -2405,11 +2407,11 @@ def build_full_report(in_path: str, root: ET.Element, tracks: List[Dict[str, Any
 
 
 
-def build_compact_v2(in_path: str, root: ET.Element, tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
-    ctracks = [compact_v2_track(t) for t in tracks]
+def build_compact(in_path: str, root: ET.Element, tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    ctracks = [compact_track(t) for t in tracks]
     total_devices = sum(t.get("dc", 0) for t in ctracks)
 
-    # Keep legend (still small in v2); remove it if you ever need even fewer tokens.
+    # Keep legend (still small); remove it if you ever need even fewer tokens.
     legend = {
         "tt": "track_type",
         "id": "track_id",
@@ -2447,11 +2449,12 @@ def build_compact_v2(in_path: str, root: ET.Element, tracks: List[Dict[str, Any]
     }
 
     return {
+        "version": SCRIPT_VERSION,
         "input_file": os.path.abspath(in_path),
         "root_tag": root.tag,
         "track_count": len(ctracks),
         "total_devices": total_devices,
-        "schema": "compact_v2",
+        "schema": "compact",
         "legend": legend,
         "tracks": ctracks,
     }
@@ -2525,7 +2528,7 @@ def print_problem_summary(full: Dict[str, Any], tracks: List[Dict[str, Any]]) ->
 # -----------------------------
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Ableton Live .als/.xml extractor: FULL + COMPACT_V2 outputs.")
+    ap = argparse.ArgumentParser(description="Ableton Live .als/.xml extractor: FULL + COMPACT outputs.")
     ap.add_argument("input", help="Path to .als or extracted .xml")
     ap.add_argument("--out-dir", default=None, help="Output directory (default: alongside input)")
     ap.add_argument("--base-name", default=None, help="Base name for outputs (default: input filename)")
@@ -2553,8 +2556,8 @@ def main() -> int:
 
     ts = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
-    full_path = os.path.join(out_dir, f"{base}.{ts}.full.audit.json")
-    compact_path = os.path.join(out_dir, f"{base}.{ts}.compact_v2.audit.json")
+    full_path = os.path.join(out_dir, f"{base}.{ts}.full.json")
+    compact_path = os.path.join(out_dir, f"{base}.{ts}.compact.json")
 
     xml_bytes = read_xml_bytes(in_path)
     root = find_liveset_root(xml_bytes)
@@ -2565,7 +2568,7 @@ def main() -> int:
     apply_deactivated_routing_impact_checks(tracks)
 
     full = build_full_report(in_path, root, tracks, dedupe_full=(not args.no_full_dedupe), strip_null_keys=(not args.keep_null_keys))
-    compact = build_compact_v2(in_path, root, tracks)
+    compact = build_compact(in_path, root, tracks)
 
     indent = None if args.minify else 2
     dump_kwargs = {"ensure_ascii": False}
@@ -2579,8 +2582,9 @@ def main() -> int:
     with open(compact_path, "w", encoding="utf-8") as f:
         json.dump(compact, f, **dump_kwargs)
 
-    print(f"Wrote FULL:       {full_path}")
-    print(f"Wrote COMPACT_V2: {compact_path}")
+    print(f"Ableton Dual Extract v{SCRIPT_VERSION}")
+    print(f"Wrote FULL:    {full_path}")
+    print(f"Wrote COMPACT: {compact_path}")
     print_problem_summary(full, tracks)
     return 0
 

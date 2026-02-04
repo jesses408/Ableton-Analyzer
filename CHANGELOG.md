@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.25] - 2026-02-04
+### Changed
+- Output filenames now end with .json (full/compact) instead of *.audit.json
+- Compact output filename no longer includes a version suffix
+- Script prints its version on run and embeds version in generated reports
+
+---
+
 ## [1.0.24] - 2026-02-04
 ### Added
 - Device settings deduplication via pools to reduce FULL file size
