@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.28] - 2026-02-05
+### Added
+- Token counting validation: Script now displays COMPACT token estimate after execution
+- estimate_tokens() function for tracking COMPACT output size against 25k token budget
+- Improved type hints for better IDE support and type safety
+
+### Fixed
+- Removed duplicate comment text at line 1682
+- Improved None checks for parameter values (more explicit None handling)
+- Removed redundant `or False` clause in has_on_automation check
+
+### Improved
+- COMPACT size monitoring: Users now see token usage percentage and budget status
+- Code clarity with explicit None checks vs falsy checks
+- Type annotations added to 5 functions for better IDE support
+
+---
+
 ## [1.0.27] - 2026-02-05
 ### Refactored
 - Extracted magic numbers to named constants (MAX_CANDIDATE_ITEMS, MAX_DISPLAYED_FAILURES, etc.) for better maintainability

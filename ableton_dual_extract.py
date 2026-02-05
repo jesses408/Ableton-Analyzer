@@ -34,7 +34,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-SCRIPT_VERSION = "1.0.27"
+SCRIPT_VERSION = "1.0.28"
 
 # -----------------------------
 # Extraction and display limits
@@ -141,6 +141,15 @@ def extract_state_hints_from_bytes(b: bytes, max_strings: int = 40, max_len: int
         pass
 
     return hints
+
+
+def estimate_tokens(text: str) -> int:
+    """
+    Rough token estimate for Claude/GPT models.
+    Uses approximation: ~4 characters per token.
+    For more accuracy, install tiktoken library.
+    """
+    return len(text) // 4
 
 
 def _find_balanced_json(text: str, start: int, max_len: int = 200000) -> Optional[str]:
@@ -269,7 +278,7 @@ def decode_plugin_state_best_effort(identifier: Optional[str], b: Optional[bytes
                 # Extract a bounded set of interesting leaf values/attrs
                 interesting = []
                 keys = ("preset", "name", "mode", "ceiling", "threshold", "ratio", "attack", "release", "drive", "oversample", "true", "gain")
-                def walk(node, path, depth=0):
+                def walk(node: ET.Element, path: str, depth: int = 0) -> None:
                     if depth > 10 or len(interesting) >= 200:
                         return
                     tag = re.sub(r"\{.*\}", "", node.tag)
@@ -537,7 +546,7 @@ def iter_with_depth(root: ET.Element, max_depth: int) -> List[Tuple[ET.Element, 
     Returns list of (element, depth).
     """
     out: List[Tuple[ET.Element, int]] = []
-    q: deque = deque([(root, 0)])
+    q: deque[Tuple[ET.Element, int]] = deque([(root, 0)])
     while q:
         node, d = q.popleft()
         out.append((node, d))
@@ -892,7 +901,7 @@ def extract_named_param_pairs(device_elem: ET.Element, limit: int = 200) -> Dict
                     pname = d.get("Value")
                 elif d.tag.endswith("ParameterValue") or d.tag.endswith("PluginFloatParameter"):
                     pval = d.get("Value")
-            if pname and pval:
+            if pname is not None and pval is not None:
                 nn = normalize_text(pname)
                 vv = normalize_text(pval)
                 if nn and vv is not None and nn not in named:
@@ -1518,7 +1527,7 @@ def extract_device_lom_id(device_elem: ET.Element) -> Optional[str]:
 
 
 
-def collect_track_envelope_pointee_ids_with_events(track_elem: ET.Element) -> set:
+def collect_track_envelope_pointee_ids_with_events(track_elem: ET.Element) -> set[str]:
     """
     Build a set of EnvelopeTarget PointeeId values for automation envelopes that contain
     actual event/value points. This is used to cheaply answer: "does this track automate
@@ -1526,7 +1535,7 @@ def collect_track_envelope_pointee_ids_with_events(track_elem: ET.Element) -> se
 
     We do NOT extract curves; we only keep IDs (strings).
     """
-    ids = set()
+    ids: set[str] = set()
 
     def has_event_points(env: ET.Element) -> bool:
         for n in env.iter():
@@ -1601,7 +1610,7 @@ def device_on_automation_target_ids(device_elem: ET.Element) -> List[str]:
     return ids
 
 
-def detect_device_on_automation(device_elem: ET.Element, track_envelope_targets: Optional[set]) -> bool:
+def detect_device_on_automation(device_elem: ET.Element, track_envelope_targets: Optional[set[str]]) -> bool:
     """
     Deterministic, low-cost indicator for "this device's On/Off is automated somewhere".
 
@@ -1679,7 +1688,7 @@ def extract_devices(track_elem: ET.Element, max_params_per_device: int, mix_sett
                     if ("infiltrator" in low) or ("xferjson" in low) or ("serum" in low):
                         plugin_decoded = decode_plugin_state_best_effort(identifier, pstate_bytes)
 
-        # Name: prefer display name, then product, then tag (never accept bool-ish) prefer display name, then product, then tag (never accept bool-ish)
+        # Name: prefer display name, then product, then tag (never accept bool-ish)
         dname = extract_device_display_name(dev) or product or dev.tag
         dname = normalize_non_boolish(dname) or dev.tag
 
@@ -2328,7 +2337,7 @@ def compact_device(d: Dict[str, Any]) -> Dict[str, Any]:
         "t": d.get("tag"),               # tag
         "n": d.get("name"),              # name
         "e": d.get("enabled"),           # enabled (True/False/None)
-        "a": bool(d.get("has_on_automation") or False),  # on/off automated?
+        "a": bool(d.get("has_on_automation")),  # on/off automated?
         "f": d.get("plugin_format"),     # format
         "i": d.get("plugin_identifier"), # identifier/path/uid
         "h": sh,                         # state hash short
@@ -2469,6 +2478,7 @@ def _canonical_json(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 def _stable_hash12(obj: Any) -> str:
+    """Return a 12-character stable hash of the object's canonical JSON."""
     h = hashlib.sha1(_canonical_json(obj).encode("utf-8")).hexdigest()
     return h[:12]
 
@@ -2800,6 +2810,29 @@ def main() -> int:
         json.dump(full, f, **dump_kwargs)
     with open(compact_path, "w", encoding="utf-8") as f:
         json.dump(compact, f, **dump_kwargs)
+
+    # Token estimation for COMPACT output
+    if os.path.exists(compact_path):
+        with open(compact_path, "r", encoding="utf-8") as f:
+            compact_json_text = f.read()
+
+        token_estimate = estimate_tokens(compact_json_text)
+        token_budget = 25000
+
+        print(f"\n{'='*60}")
+        print("COMPACT Token Estimate:")
+        print(f"  Size: ~{token_estimate:,} tokens")
+        print(f"  Budget: {token_budget:,} tokens")
+
+        if token_estimate <= token_budget:
+            percentage = (token_estimate / token_budget) * 100
+            print(f"  Status: Within budget ({percentage:.1f}% used)")
+        else:
+            overage = token_estimate - token_budget
+            print(f"  Status: OVER BUDGET by ~{overage:,} tokens!")
+            print(f"  Warning: COMPACT output may exceed Claude context limits")
+
+        print(f"{'='*60}\n")
 
     print(f"Ableton Dual Extract v{SCRIPT_VERSION}")
     print(f"Wrote FULL:    {full_path}")
