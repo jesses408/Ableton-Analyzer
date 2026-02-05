@@ -231,11 +231,43 @@ If adding new data:
 
 ## Change Management
 
-- Update `VERSION` for releases
-- Add entries to `CHANGELOG.md` in descending order
+### Git Workflow
+
+This project is tracked in Git and changes should be committed and pushed to the `main` branch.
+
+**After every batch of changes:**
+
+1. **Update VERSION** in BOTH locations:
+   - `VERSION` file (for repo visibility)
+   - `SCRIPT_VERSION` constant in `ableton_dual_extract.py` line 36 (for standalone script)
+   - Increment using semantic versioning (e.g., `1.0.25` → `1.0.26`)
+
+2. **Update CHANGELOG.md**:
+   - Add entries in descending order (newest at top)
+   - Include version number, date, and bullet list of changes
+   - Follow existing format
+
+3. **Update README.md** as necessary:
+   - Update if user-facing features changed
+   - Update if command-line arguments changed
+   - Update if output format changed
+
+4. **Commit and push to main**:
+   ```bash
+   git add .
+   git commit -m "v1.0.X: Description of changes"
+   git push origin main
+   ```
+
+### General Guidelines
+
 - Prefer feature flags for new verbose outputs (`--mix-settings`, future `--trace`, etc.)
+- Keep the VERSION file and script version in sync at all times
+- Test before committing (see Testing Strategy below)
 
 ## Testing Strategy (Lightweight)
+
+### Smoke Tests
 
 Minimal smoke tests recommended:
 - Run on a known `.als`
@@ -243,14 +275,54 @@ Minimal smoke tests recommended:
 - Validate schema keys exist
 - Validate COMPACT token size stays under budget (approx estimate by chars/4 or use a tokenizer offline)
 
-Regression checks:
-- track deactivation detection unchanged
-- on/off automation mapping unchanged
-- routing break count stable for a reference project
+### Regression Testing (Critical for Refactoring)
+
+When making changes that could affect output (refactoring, bug fixes, new features), use this procedure to ensure zero regressions:
+
+**Test file:** `d:\temp6\Acid Breaks Project 2026-02-03-03.als`
+
+**Before making changes:**
+```bash
+# Run script on test file and save outputs
+python ableton_dual_extract.py "d:\temp6\Acid Breaks Project 2026-02-03-03.als" > before_stdout.txt
+
+# Save the generated JSON files
+cp "d:\temp6\Acid Breaks Project 2026-02-03-03.full.json" before.full.json
+cp "d:\temp6\Acid Breaks Project 2026-02-03-03.compact.json" before.compact.json
+```
+
+**After making changes:**
+```bash
+# Run script on same test file
+python ableton_dual_extract.py "d:\temp6\Acid Breaks Project 2026-02-03-03.als" > after_stdout.txt
+
+# Save the generated JSON files
+cp "d:\temp6\Acid Breaks Project 2026-02-03-03.full.json" after.full.json
+cp "d:\temp6\Acid Breaks Project 2026-02-03-03.compact.json" after.compact.json
+```
+
+**Compare outputs:**
+```bash
+# Compare stdout
+diff before_stdout.txt after_stdout.txt
+
+# Compare JSON files
+diff before.full.json after.full.json
+diff before.compact.json after.compact.json
+```
+
+**Expected result:** All diffs should be EMPTY (no output from diff commands)
+
+If any diffs appear, investigate thoroughly before committing:
+- Track deactivation detection must be unchanged
+- On/off automation mapping must be unchanged
+- Routing break count must be stable
+- Device extraction must be identical
+- QC summary must match exactly
 
 ## Safe Modification Checklist
 
-Before merging changes:
+Before committing/pushing changes:
 - [ ] Does COMPACT schema remain stable/minimal?
 - [ ] Are legends updated if codes changed?
 - [ ] Did FULL size increase significantly? If yes, why?
@@ -258,6 +330,9 @@ Before merging changes:
 - [ ] Did routing-break detection regress?
 - [ ] Did device on/off automation detection regress?
 - [ ] Does it run on macOS/Windows/Linux (stdlib only)?
+- [ ] VERSION incremented in BOTH `VERSION` file and `ableton_dual_extract.py`?
+- [ ] CHANGELOG.md updated with changes?
+- [ ] README.md updated if user-facing changes were made?
 
 ---
 
