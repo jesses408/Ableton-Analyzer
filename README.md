@@ -269,6 +269,45 @@ Report export risks and routing failures.
 
 ---
 
+## AI Agent Analysis Guide
+
+**For AI-powered analysis, provide ANALYSIS_GUIDE.md along with the JSON files.**
+
+The repository includes `ANALYSIS_GUIDE.md`, a comprehensive guide written specifically for AI agents (Claude, ChatGPT, etc.) to properly analyze the JSON outputs.
+
+### What ANALYSIS_GUIDE.md Provides:
+
+- QC code reference with severity priorities
+- User workflow context (track deactivation vs mute)
+- Analysis priorities (export safety first, then mix concerns)
+- JSON structure interpretation
+- Device settings interpretation (EQ8, Glue, Utility, Drum Buss)
+- Output format templates for structured analysis
+- Common issues and red flags to look for
+- Complete example analysis reports
+
+### Usage with AI Agents:
+
+When requesting AI analysis of your project, include both:
+
+1. The JSON file (`*.full.json` or `*.compact.json`)
+2. `ANALYSIS_GUIDE.md` from this repository
+
+**Example prompt:**
+
+```
+I'm providing two files:
+1. ANALYSIS_GUIDE.md - instructions for how to analyze the JSON
+2. MyProject.full.json - my Ableton project analysis
+
+Please follow the ANALYSIS_GUIDE to analyze my project and provide
+a structured report on export safety issues and mix recommendations.
+```
+
+This ensures the AI agent understands your workflow, prioritizes critical issues correctly, and provides actionable feedback in the proper format.
+
+---
+
 ## Example Analysis Prompts
 
 ### Find Technical Mistakes
