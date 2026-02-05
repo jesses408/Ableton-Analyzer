@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.27] - 2026-02-05
+### Refactored
+- Extracted magic numbers to named constants (MAX_CANDIDATE_ITEMS, MAX_DISPLAYED_FAILURES, etc.) for better maintainability
+- Consolidated plugin role classification logic into single canonical function
+- Created device extraction registry with 13 individual extractor functions for cleaner architecture
+- Refactored long functions with helper functions (_build_routing_graph, _detect_dead_and_orphan_buses, _find_deactivated_paths)
+
+### Improved
+- Pre-compiled regex patterns moved to module level for better performance (BUS_NAME_PATTERN, FLAG_PATTERNS)
+- Replaced 11 bare `except Exception` clauses with specific exception types (ValueError, TypeError, JSONDecodeError, etc.)
+- Moved all imports to top level following PEP 8 standards
+- Code readability and maintainability significantly improved
+
+### Performance
+- Regex compilation overhead eliminated by pre-compiling patterns at module level
+- find_flag() now accepts pre-compiled patterns for better performance
+
+---
+
 ## [1.0.26] - 2026-02-05
 ### Fixed
 - Removed 71 lines of dead/unreachable code after return statement in detect_device_on_automation()

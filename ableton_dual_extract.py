@@ -32,9 +32,18 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-SCRIPT_VERSION = "1.0.26"
+SCRIPT_VERSION = "1.0.27"
+
+# -----------------------------
+# Extraction and display limits
+# -----------------------------
+MAX_CANDIDATE_ITEMS = 128  # Limit for routing candidates to prevent memory issues
+MAX_DISPLAYED_FAILURES = 25  # Console output limit for readability
+MAX_PATH_IDS = 25  # Maximum path IDs before truncation
+PATH_EDGE_ITEMS = 5  # Number of items to show at start/end when truncating
+MAX_PLUGIN_CHUNKS = 128  # Maximum plugin state chunks to process
 
 # -----------------------------
 # IO helpers
@@ -81,12 +90,12 @@ def extract_plugin_state_bytes(device_elem: ET.Element) -> Optional[bytes]:
         if cleaned and all(c in "0123456789abcdefABCDEF" for c in cleaned) and len(cleaned) % 2 == 0 and len(cleaned) >= 32:
             try:
                 return bytes.fromhex(cleaned)
-            except Exception:
+            except (ValueError, TypeError):
                 continue
         # Fallback: treat as raw text
         try:
             return txt.encode("utf-8", errors="ignore")
-        except Exception:
+        except (UnicodeEncodeError, TypeError):
             return None
     return None
 
@@ -128,7 +137,7 @@ def extract_state_hints_from_bytes(b: bytes, max_strings: int = 40, max_len: int
                 hints.append(r)
             if len(hints) >= max_strings:
                 break
-    except Exception:
+    except (UnicodeDecodeError, TypeError):
         pass
 
     return hints
@@ -171,12 +180,12 @@ def _extract_plugin_text_blobs(b: bytes, max_text: int = 400000) -> str:
     """Decode bytes to text best-effort (utf-8 then latin-1) and bound size."""
     try:
         t = b.decode("utf-8", errors="ignore")
-    except Exception:
+    except (UnicodeDecodeError, TypeError, AttributeError):
         t = ""
     if not t:
         try:
             t = b.decode("latin-1", errors="ignore")
-        except Exception:
+        except (UnicodeDecodeError, TypeError, AttributeError):
             t = ""
     if len(t) > max_text:
         t = t[:max_text]
@@ -227,7 +236,7 @@ def decode_plugin_state_best_effort(identifier: Optional[str], b: Optional[bytes
                     if isinstance(data, dict) and k2 in data
                 }
                 out["json_keys"] = sorted(list(data.keys()))[:60] if isinstance(data, dict) else None
-        except Exception:
+        except (json.JSONDecodeError, ValueError, TypeError, KeyError):
             pass
 
     # Generic embedded JSON object
@@ -239,7 +248,7 @@ def decode_plugin_state_best_effort(identifier: Optional[str], b: Optional[bytes
                 if isinstance(data, dict):
                     out["json"] = {k: data.get(k) for k in list(data.keys())[:40]}
                     out["json_keys"] = sorted(list(data.keys()))[:60]
-        except Exception:
+        except (json.JSONDecodeError, ValueError, TypeError, KeyError):
             pass
 
     # Embedded XML (some plugins store JUCE ValueTree XML or similar)
@@ -284,16 +293,23 @@ def decode_plugin_state_best_effort(identifier: Optional[str], b: Optional[bytes
                 walk(root, "")
                 out["xml_hints"] = interesting[:200] if interesting else None
                 out["xml_root"] = re.sub(r"\{.*\}", "", root.tag)
-        except Exception:
+        except (ET.ParseError, ValueError, TypeError):
             pass
 
     return out if out else None
 
 
-def plugin_role_from_identifier(identifier: Optional[str]) -> Optional[str]:
+def classify_plugin_role(identifier: str) -> Optional[str]:
+    """
+    Classify plugin role based on identifier/name.
+    Returns: "limiter", "clipper", "compressor", "transient_shaper", "exciter",
+             "saturator", "eq", "reverb", "delay", or None if unknown.
+    """
     if not identifier:
         return None
+
     low = identifier.lower()
+
     if "limiter" in low:
         return "limiter"
     if "clip" in low:
@@ -313,6 +329,11 @@ def plugin_role_from_identifier(identifier: Optional[str]) -> Optional[str]:
     if "delay" in low or "echo" in low:
         return "delay"
     return None
+
+
+def plugin_role_from_identifier(identifier: Optional[str]) -> Optional[str]:
+    """Wrapper for backward compatibility."""
+    return classify_plugin_role(identifier)
 
 
 def plugin_hint_tags_from_bytes(b: Optional[bytes]) -> List[str]:
@@ -423,14 +444,14 @@ def normalize_scalar(v: Any) -> Any:
     if re.fullmatch(r"-?\d+", s):
         try:
             return int(s)
-        except Exception:
+        except (ValueError, TypeError):
             pass
 
     # float?
     if re.fullmatch(r"-?\d+(?:\.\d+)?(?:[eE]-?\d+)?", s):
         try:
             return float(s)
-        except Exception:
+        except (ValueError, TypeError):
             pass
 
     # bool (textual only)
@@ -478,7 +499,7 @@ def parse_float(s: Optional[str]) -> Optional[float]:
         return None
     try:
         return float(s)
-    except Exception:
+    except (ValueError, TypeError):
         return None
 
 
@@ -565,8 +586,11 @@ def extract_track_flags(track_elem: ET.Element) -> Dict[str, Optional[bool]]:
     Keep regex-based tag matching, but once a candidate node is found, extract the
     boolean with a nested Manual fallback.
     """
-    def find_flag(tag_regex: str) -> Optional[bool]:
-        rx = re.compile(tag_regex)
+    def find_flag(tag_pattern: Union[str, re.Pattern]) -> Optional[bool]:
+        if isinstance(tag_pattern, str):
+            rx = re.compile(tag_pattern)
+        else:
+            rx = tag_pattern
         for d in track_elem.iter():
             if rx.search(d.tag or ""):
                 b = bool_from_node_manual(d)
@@ -574,10 +598,13 @@ def extract_track_flags(track_elem: ET.Element) -> Dict[str, Optional[bool]]:
                     return b
         return None
 
-    def find_flag_in(subtree: Optional[ET.Element], tag_regex: str) -> Optional[bool]:
+    def find_flag_in(subtree: Optional[ET.Element], tag_pattern: Union[str, re.Pattern]) -> Optional[bool]:
         if subtree is None:
             return None
-        rx = re.compile(tag_regex)
+        if isinstance(tag_pattern, str):
+            rx = re.compile(tag_pattern)
+        else:
+            rx = tag_pattern
         for d in subtree.iter():
             if rx.search(d.tag or ""):
                 b = bool_from_node_manual(d)
@@ -592,7 +619,7 @@ def extract_track_flags(track_elem: ET.Element) -> Dict[str, Optional[bool]]:
         active = bool_from_node_manual(speaker)
     if active is None:
         # Fallback to any Speaker node in the track subtree.
-        active = find_flag(r"(Speaker)$")
+        active = find_flag(FLAG_PATTERNS["speaker"])
 
     deactivated: Optional[bool] = None
     if active is not None:
@@ -603,14 +630,14 @@ def extract_track_flags(track_elem: ET.Element) -> Dict[str, Optional[bool]]:
     # because that frequently finds device/internal "Mute" parameters (e.g., StereoGain/Mute).
     mixer = track_elem.find("./DeviceChain/Mixer")
     muted = (
-        find_flag_in(mixer, r"(IsMuted|Mute)$")
-        or find_flag_in(mixer, r"(TrackMute|MuteButton|MuteState)$")
+        find_flag_in(mixer, FLAG_PATTERNS["mute"])
+        or find_flag_in(mixer, FLAG_PATTERNS["mute_alt"])
     )
 
     return {
         "muted": muted,
-        "solo": find_flag(r"(IsSolo|Solo)$"),
-        "arm": find_flag(r"(IsArmed|Arm|RecordArm)$"),
+        "solo": find_flag(FLAG_PATTERNS["solo"]),
+        "arm": find_flag(FLAG_PATTERNS["arm"]),
         "active": active,
         "deactivated": deactivated,
     }
@@ -727,6 +754,17 @@ _REF_NAME_RX = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+BUS_NAME_PATTERN = re.compile(r"(bus|return|fx|send|recv|receive)", re.IGNORECASE)
+
+# Pre-compiled flag patterns for track flag detection
+FLAG_PATTERNS = {
+    "solo": re.compile(r"(IsSolo|Solo)$"),
+    "arm": re.compile(r"(IsArmed|Arm|RecordArm)$"),
+    "mute": re.compile(r"(IsMuted|Mute)$"),
+    "mute_alt": re.compile(r"(TrackMute|MuteButton|MuteState)$"),
+    "speaker": re.compile(r"(Speaker)$"),
+}
 
 def compute_final_qc_flags(track: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -1156,7 +1194,7 @@ def _extract_group_device_structure(group_elem: ET.Element) -> Optional[Dict[str
     branches: List[Dict[str, Any]] = []
     br = group_elem.find(".//Branches")
     if br is not None:
-        for b in list(br)[:128]:
+        for b in list(br)[:MAX_CANDIDATE_ITEMS]:
             bname = _get_param_attr(b, "Name", "Value")
             sel = b.find("BranchSelectorRange")
             lo = _get_param_attr(sel, "Min", "Value") if sel is not None else None
@@ -1173,6 +1211,198 @@ def _extract_group_device_structure(group_elem: ET.Element) -> Optional[Dict[str
     return d or None
 
 
+# -----------------------------
+# Device Extraction Registry
+# -----------------------------
+
+def _extract_eq8_settings(device_elem: ET.Element) -> Dict[str, Any]:
+    """Extract EQ8 settings."""
+    out: Dict[str, Any] = {}
+    bands = _extract_eq8_bands(device_elem)
+    if bands:
+        out["bands"] = bands
+    for k in ("AdaptiveQFactor", "ChannelMode", "AnalyzeOn", "SelectedBand"):
+        v = _get_param(device_elem, k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def _extract_stereogain_settings(device_elem: ET.Element) -> Dict[str, Any]:
+    """Extract Utility/StereoGain settings."""
+    out: Dict[str, Any] = {}
+    for k in ("Gain", "StereoWidth", "Mono", "BassMono", "BassMonoFrequency", "PhaseInvertL", "PhaseInvertR", "ChannelMode"):
+        v = _get_param(device_elem, k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def _extract_gluecompressor_settings(device_elem: ET.Element) -> Dict[str, Any]:
+    """Extract GlueCompressor settings."""
+    out: Dict[str, Any] = {}
+    for k in ("Threshold", "Ratio", "Attack", "Release", "Makeup", "DryWet", "Range", "PeakClipIn", "Oversample"):
+        v = _get_param(device_elem, k)
+        if v is not None:
+            out[k] = v
+    # Sidechain summary (source string is crucial)
+    sc_target = _get_param_attr(device_elem, ".//SideChain/RoutedInput/Routable/Target", "Value")
+    if sc_target is not None:
+        out["sidechain_target"] = sc_target
+    sc_on = _get_param_attr(device_elem, ".//SideChain/OnOff", "Value")
+    if sc_on is not None:
+        out["sidechain_on"] = sc_on
+    return out
+
+
+def _extract_drumbuss_settings(device_elem: ET.Element) -> Dict[str, Any]:
+    """Extract DrumBuss settings."""
+    out: Dict[str, Any] = {}
+    for k in ("EnableCompression", "DriveAmount", "DriveType", "CrunchAmount", "DampingFrequency",
+              "TransientShaping", "BoomFrequency", "BoomAmount", "BoomDecay", "InputTrim", "OutputGain", "DryWet"):
+        v = _get_param(device_elem, k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def _extract_autopan2_settings(device_elem: ET.Element) -> Dict[str, Any]:
+    """Extract AutoPan settings."""
+    out: Dict[str, Any] = {}
+    for k in ("Mode", "Modulation_Amount", "Modulation_Waveform", "Modulation_Frequency", "Modulation_Time",
+              "Modulation_SyncedRate", "Modulation_Sixteenth", "Modulation_Phase", "Modulation_PhaseOffset",
+              "Modulation_StereoMode", "Modulation_Spin", "AttackTime", "VintageMode", "HarmonicMode"):
+        v = _get_param(device_elem, k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def _extract_delay_settings(device_elem: ET.Element) -> Dict[str, Any]:
+    """Extract Delay settings."""
+    out: Dict[str, Any] = {}
+    for k in ("DelayLine_Link", "DelayLine_PingPong", "DelayLine_SyncL", "DelayLine_SyncR", "DelayLine_TimeL", "DelayLine_TimeR",
+              "DelayLine_SyncedSixteenthL", "DelayLine_SyncedSixteenthR", "Feedback", "Freeze",
+              "Filter_On", "Filter_Frequency", "Filter_Bandwidth", "Modulation_Frequency", "Modulation_AmountTime", "Modulation_AmountFilter",
+              "DryWet", "EcoProcessing"):
+        v = _get_param(device_elem, k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def _extract_echo_settings(device_elem: ET.Element) -> Dict[str, Any]:
+    """Extract Echo settings."""
+    out: Dict[str, Any] = {}
+    for k in ("Delay_TimeLink", "Delay_SyncL", "Delay_TimeL", "Delay_SyncR", "Delay_TimeR", "Feedback",
+              "ChannelMode", "InputGain", "OutputGain", "Gate_On", "Gate_Threshold", "Gate_Release",
+              "Ducking_On", "Ducking_Threshold", "Ducking_Release",
+              "Filter_On", "Filter_HighPassFrequency", "Filter_LowPassFrequency",
+              "Modulation_Waveform", "Modulation_Frequency", "Modulation_AmountDelay", "Modulation_AmountFilter",
+              "Reverb_Level", "Reverb_Decay", "StereoWidth", "DryWet"):
+        v = _get_param(device_elem, k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def _extract_saturator_settings(device_elem: ET.Element) -> Dict[str, Any]:
+    """Extract Saturator settings."""
+    out: Dict[str, Any] = {}
+    for k in ("PreDrive", "Type", "ColorOn", "BaseDrive", "ColorFrequency", "ColorWidth", "ColorDepth",
+              "PostClip", "PostDrive", "DryWet", "Oversampling"):
+        v = _get_param(device_elem, k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def _extract_vocoder_settings(device_elem: ET.Element) -> Dict[str, Any]:
+    """Extract Vocoder settings."""
+    out: Dict[str, Any] = {}
+    for k in ("LowFrequency", "HighFrequency", "FormantShift", "FilterBandWidth", "Retro", "LevelGate",
+              "OutputGain", "EnvelopeRate", "EnvelopeRelease", "CarrierSource", "CarrierFlatten", "MonoStereo",
+              "DryWet", "ModulatorAmount"):
+        v = _get_param(device_elem, k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def _extract_group_settings(device_elem: ET.Element) -> Dict[str, Any]:
+    """Extract InstrumentGroupDevice/DrumGroupDevice settings."""
+    out: Dict[str, Any] = {}
+    struct = _extract_group_device_structure(device_elem)
+    if struct:
+        out.update(struct)
+    return out
+
+
+def _extract_drumcell_settings(device_elem: ET.Element) -> Dict[str, Any]:
+    """Extract DrumCell settings."""
+    out: Dict[str, Any] = {}
+    sample_path = _get_param_attr(device_elem, ".//UserSample/Value/SampleRef/FileRef/RelativePath", "Value") \
+        or _get_param_attr(device_elem, ".//UserSample/Value/SampleRef/FileRef/Path", "Value")
+    if sample_path:
+        out["sample"] = sample_path
+    for k in ("Voice_Gain", "Voice_Transpose", "Voice_Detune", "Voice_Filter_On", "Voice_Filter_Frequency",
+              "Voice_Filter_Resonance", "Voice_Envelope_Attack", "Voice_Envelope_Decay", "Voice_Envelope_Release",
+              "Volume", "Pan"):
+        v = _get_param(device_elem, k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def _extract_instrumentvector_settings(device_elem: ET.Element) -> Dict[str, Any]:
+    """Extract InstrumentVector (Wavetable) settings."""
+    out: Dict[str, Any] = {}
+    keys = [
+        "Voice_Oscillator1_On","Voice_Oscillator1_Pitch_Transpose","Voice_Oscillator1_Pitch_Detune",
+        "Voice_Oscillator1_Wavetables_WavePosition","Voice_Oscillator1_Gain",
+        "Voice_Oscillator2_On","Voice_Oscillator2_Pitch_Transpose","Voice_Oscillator2_Pitch_Detune",
+        "Voice_Oscillator2_Wavetables_WavePosition","Voice_Oscillator2_Gain",
+        "Voice_Filter1_On","Voice_Filter1_Type","Voice_Filter1_Slope","Voice_Filter1_Frequency","Voice_Filter1_Resonance","Voice_Filter1_Drive",
+        "Voice_Filter2_On","Voice_Filter2_Type","Voice_Filter2_Slope","Voice_Filter2_Frequency","Voice_Filter2_Resonance","Voice_Filter2_Drive",
+        "Voice_Modulators_AmpEnvelope_Times_Attack","Voice_Modulators_AmpEnvelope_Times_Decay","Voice_Modulators_AmpEnvelope_Times_Release",
+        "Voice_Modulators_AmpEnvelope_Sustain",
+    ]
+    for k in keys:
+        v = _get_param(device_elem, k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def _extract_mxdevice_settings(device_elem: ET.Element) -> Dict[str, Any]:
+    """Extract Max for Live device settings."""
+    out: Dict[str, Any] = {}
+    params = _extract_mxd_params(device_elem, max_params=64)
+    if params:
+        out["params"] = params
+    return out
+
+
+# Device extractor registry mapping device tags to extraction functions
+DEVICE_EXTRACTORS: Dict[str, Callable[[ET.Element], Dict[str, Any]]] = {
+    "eq8": _extract_eq8_settings,
+    "stereogain": _extract_stereogain_settings,
+    "gluecompressor": _extract_gluecompressor_settings,
+    "drumbuss": _extract_drumbuss_settings,
+    "autopan2": _extract_autopan2_settings,
+    "delay": _extract_delay_settings,
+    "echo": _extract_echo_settings,
+    "saturator": _extract_saturator_settings,
+    "vocoder": _extract_vocoder_settings,
+    "instrumentgroupdevice": _extract_group_settings,
+    "drumgroupdevice": _extract_group_settings,
+    "drumcell": _extract_drumcell_settings,
+    "instrumentvector": _extract_instrumentvector_settings,
+    "mxdevicemidieffect": _extract_mxdevice_settings,
+    "mxdeviceaudioeffect": _extract_mxdevice_settings,
+}
+
+
 def extract_device_key_settings(device_elem: ET.Element, device_tag: str) -> Optional[Dict[str, Any]]:
     """
     Device-specific 'high value' settings capture for mix/loudness advice.
@@ -1182,141 +1412,10 @@ def extract_device_key_settings(device_elem: ET.Element, device_tag: str) -> Opt
     every wrapper/GUI field.
     """
     tag = (device_tag or "").lower()
-    out: Dict[str, Any] = {}
 
-    # ---------- STOCK AUDIO EFFECTS ----------
-    if tag == "eq8":
-        bands = _extract_eq8_bands(device_elem)
-        if bands:
-            out["bands"] = bands
-        # Also keep a few global toggles if present
-        for k in ("AdaptiveQFactor", "ChannelMode", "AnalyzeOn", "SelectedBand"):
-            v = _get_param(device_elem, k)
-            if v is not None:
-                out[k] = v
-        return out or None
-
-    if tag == "stereogain":  # Utility
-        for k in ("Gain", "StereoWidth", "Mono", "BassMono", "BassMonoFrequency", "PhaseInvertL", "PhaseInvertR", "ChannelMode"):
-            v = _get_param(device_elem, k)
-            if v is not None:
-                out[k] = v
-        return out or None
-
-    if tag == "gluecompressor":
-        for k in ("Threshold", "Ratio", "Attack", "Release", "Makeup", "DryWet", "Range", "PeakClipIn", "Oversample"):
-            v = _get_param(device_elem, k)
-            if v is not None:
-                out[k] = v
-        # Sidechain summary (source string is crucial)
-        sc_target = _get_param_attr(device_elem, ".//SideChain/RoutedInput/Routable/Target", "Value")
-        if sc_target is not None:
-            out["sidechain_target"] = sc_target
-        sc_on = _get_param_attr(device_elem, ".//SideChain/OnOff", "Value")
-        if sc_on is not None:
-            out["sidechain_on"] = sc_on
-        return out or None
-
-    if tag == "drumbuss":
-        for k in ("EnableCompression", "DriveAmount", "DriveType", "CrunchAmount", "DampingFrequency",
-                  "TransientShaping", "BoomFrequency", "BoomAmount", "BoomDecay", "InputTrim", "OutputGain", "DryWet"):
-            v = _get_param(device_elem, k)
-            if v is not None:
-                out[k] = v
-        return out or None
-
-    if tag == "autopan2":
-        for k in ("Mode", "Modulation_Amount", "Modulation_Waveform", "Modulation_Frequency", "Modulation_Time",
-                  "Modulation_SyncedRate", "Modulation_Sixteenth", "Modulation_Phase", "Modulation_PhaseOffset",
-                  "Modulation_StereoMode", "Modulation_Spin", "AttackTime", "VintageMode", "HarmonicMode"):
-            v = _get_param(device_elem, k)
-            if v is not None:
-                out[k] = v
-        return out or None
-
-    if tag == "delay":
-        for k in ("DelayLine_Link", "DelayLine_PingPong", "DelayLine_SyncL", "DelayLine_SyncR", "DelayLine_TimeL", "DelayLine_TimeR",
-                  "DelayLine_SyncedSixteenthL", "DelayLine_SyncedSixteenthR", "Feedback", "Freeze",
-                  "Filter_On", "Filter_Frequency", "Filter_Bandwidth", "Modulation_Frequency", "Modulation_AmountTime", "Modulation_AmountFilter",
-                  "DryWet", "EcoProcessing"):
-            v = _get_param(device_elem, k)
-            if v is not None:
-                out[k] = v
-        return out or None
-
-    if tag == "echo":
-        for k in ("Delay_TimeLink", "Delay_SyncL", "Delay_TimeL", "Delay_SyncR", "Delay_TimeR", "Feedback",
-                  "ChannelMode", "InputGain", "OutputGain", "Gate_On", "Gate_Threshold", "Gate_Release",
-                  "Ducking_On", "Ducking_Threshold", "Ducking_Release",
-                  "Filter_On", "Filter_HighPassFrequency", "Filter_LowPassFrequency",
-                  "Modulation_Waveform", "Modulation_Frequency", "Modulation_AmountDelay", "Modulation_AmountFilter",
-                  "Reverb_Level", "Reverb_Decay", "StereoWidth", "DryWet"):
-            v = _get_param(device_elem, k)
-            if v is not None:
-                out[k] = v
-        return out or None
-
-    if tag == "saturator":
-        for k in ("PreDrive", "Type", "ColorOn", "BaseDrive", "ColorFrequency", "ColorWidth", "ColorDepth",
-                  "PostClip", "PostDrive", "DryWet", "Oversampling"):
-            v = _get_param(device_elem, k)
-            if v is not None:
-                out[k] = v
-        return out or None
-
-    if tag == "vocoder":
-        for k in ("LowFrequency", "HighFrequency", "FormantShift", "FilterBandWidth", "Retro", "LevelGate",
-                  "OutputGain", "EnvelopeRate", "EnvelopeRelease", "CarrierSource", "CarrierFlatten", "MonoStereo",
-                  "DryWet", "ModulatorAmount"):
-            v = _get_param(device_elem, k)
-            if v is not None:
-                out[k] = v
-        return out or None
-
-    # ---------- RACKS / INSTRUMENTS ----------
-    if tag in ("instrumentgroupdevice", "drumgroupdevice"):
-        struct = _extract_group_device_structure(device_elem)
-        if struct:
-            out.update(struct)
-        return out or None
-
-    if tag == "drumcell":
-        # Capture key sample + voice shaping
-        sample_path = _get_param_attr(device_elem, ".//UserSample/Value/SampleRef/FileRef/RelativePath", "Value") \
-            or _get_param_attr(device_elem, ".//UserSample/Value/SampleRef/FileRef/Path", "Value")
-        if sample_path:
-            out["sample"] = sample_path
-        for k in ("Voice_Gain", "Voice_Transpose", "Voice_Detune", "Voice_Filter_On", "Voice_Filter_Frequency",
-                  "Voice_Filter_Resonance", "Voice_Envelope_Attack", "Voice_Envelope_Decay", "Voice_Envelope_Release",
-                  "Volume", "Pan"):
-            v = _get_param(device_elem, k)
-            if v is not None:
-                out[k] = v
-        return out or None
-
-    if tag == "instrumentvector":
-        # Wavetable-esque instrument: capture key oscillator + filter + amp env
-        keys = [
-            "Voice_Oscillator1_On","Voice_Oscillator1_Pitch_Transpose","Voice_Oscillator1_Pitch_Detune",
-            "Voice_Oscillator1_Wavetables_WavePosition","Voice_Oscillator1_Gain",
-            "Voice_Oscillator2_On","Voice_Oscillator2_Pitch_Transpose","Voice_Oscillator2_Pitch_Detune",
-            "Voice_Oscillator2_Wavetables_WavePosition","Voice_Oscillator2_Gain",
-            "Voice_Filter1_On","Voice_Filter1_Type","Voice_Filter1_Slope","Voice_Filter1_Frequency","Voice_Filter1_Resonance","Voice_Filter1_Drive",
-            "Voice_Filter2_On","Voice_Filter2_Type","Voice_Filter2_Slope","Voice_Filter2_Frequency","Voice_Filter2_Resonance","Voice_Filter2_Drive",
-            "Voice_Modulators_AmpEnvelope_Times_Attack","Voice_Modulators_AmpEnvelope_Times_Decay","Voice_Modulators_AmpEnvelope_Times_Release",
-            "Voice_Modulators_AmpEnvelope_Sustain",
-        ]
-        for k in keys:
-            v = _get_param(device_elem, k)
-            if v is not None:
-                out[k] = v
-        return out or None
-
-    # ---------- MAX FOR LIVE ----------
-    if tag in ("mxdevicemidieffect", "mxdeviceaudioeffect"):
-        params = _extract_mxd_params(device_elem, max_params=64)
-        if params:
-            out["params"] = params
+    # Use registry if device type is known
+    if tag in DEVICE_EXTRACTORS:
+        out = DEVICE_EXTRACTORS[tag](device_elem)
         return out or None
 
     # Fallback: bounded key-term scan (keeps size in check)
@@ -1542,7 +1641,7 @@ def extract_devices(track_elem: ET.Element, max_params_per_device: int, mix_sett
         for e in track_elem.iter():
             if e.tag.endswith("Device") or "Plugin" in e.tag:
                 candidates.append(e)
-        candidates = candidates[:128]
+        candidates = candidates[:MAX_CANDIDATE_ITEMS]
     else:
         candidates = list(devices_container)
 
@@ -1699,6 +1798,199 @@ def _extract_any_track_id_from_routing(s: Optional[str]) -> Optional[str]:
         return None
     m = _TRACK_REF_RX.search(s)
     return m.group(1) if m else None
+
+
+def _build_routing_graph(
+    tracks: List[Dict[str, Any]],
+    by_id: Dict[str, Dict[str, Any]]
+) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
+    """
+    Build routing edge maps from track routing information.
+
+    Returns:
+        edges: Dict mapping source track ID to list of destination track IDs
+        incoming: Dict mapping destination track ID to list of source track IDs
+        consumers_of: Dict mapping source track ID to list of consumer track IDs (via audio_in)
+    """
+    edges: Dict[str, List[str]] = {}
+    incoming: Dict[str, List[str]] = {}
+    consumers_of: Dict[str, List[str]] = {}
+
+    def add_edge(src: str, dst: str) -> None:
+        if not src or not dst or src == dst:
+            return
+        if src not in by_id or dst not in by_id:
+            return
+        edges.setdefault(src, []).append(dst)
+        incoming.setdefault(dst, []).append(src)
+
+    # A) downstream from AudioIn references (dst receives from src)
+    for t in tracks:
+        tid = str(t.get("track_id")) if t.get("track_id") is not None else None
+        if not tid:
+            continue
+        ai = (t.get("routing") or {}).get("audio_in")
+        src = _extract_any_track_id_from_routing(ai)
+        if src and src in by_id:
+            consumers_of.setdefault(src, []).append(tid)
+            add_edge(src, tid)
+
+    # B) downstream from AudioOut track refs (src routes to dst)
+    for t in tracks:
+        tid = str(t.get("track_id")) if t.get("track_id") is not None else None
+        if not tid:
+            continue
+        ao = (t.get("routing") or {}).get("audio_out")
+        dst = _extract_any_track_id_from_routing(ao)
+        if dst:
+            add_edge(tid, dst)
+
+        # GroupTrack audio out usually means "to parent group"
+        if dst is None and isinstance(ao, str) and "AudioOut/GroupTrack" in ao:
+            pg = t.get("parent_group_id")
+            if pg and str(pg) != "-1":
+                # Resolve missing GroupTrack ID using parent_group_id (important for routing analysis)
+                (t.setdefault("routing", {}))["audio_out_resolved_group_id"] = str(pg)
+                add_edge(tid, str(pg))
+
+    return edges, incoming, consumers_of
+
+
+def _detect_dead_and_orphan_buses(
+    by_id: Dict[str, Dict[str, Any]],
+    incoming: Dict[str, List[str]]
+) -> None:
+    """
+    Detect dead bus and orphan bus conditions and annotate tracks in-place.
+
+    Dead bus: track has upstream sources, but ALL are deactivated
+    Orphan bus: bus-like track (by name) has no upstream sources at all
+    """
+    bus_name_rx = BUS_NAME_PATTERN
+    for tid, t in by_id.items():
+        inc = incoming.get(tid, [])
+        if inc:
+            total = len(set(inc))
+            active = 0
+            for sid in set(inc):
+                s = by_id.get(sid)
+                if not s:
+                    continue
+                if (s.get("flags") or {}).get("deactivated") is not True:
+                    active += 1
+            if total > 0 and active == 0:
+                t["routing_dead_bus"] = True
+                msgs = t.setdefault("routing_impact", [])
+                msgs.append(f"dead bus: upstream sources exist ({total}) but all are deactivated")
+                t["routing_break"] = True
+        else:
+            # Orphan heuristic: looks like a bus/return but nobody feeds it
+            nm = (t.get("name") or "")
+            if bus_name_rx.search(nm) and (t.get("track_type") in ("AudioTrack", "GroupTrack")):
+                # Only consider if its audio_in isn't explicitly external/track-ref
+                ai = (t.get("routing") or {}).get("audio_in")
+                aik = parse_routing_kind(ai)
+                if aik in ("n", "m", "u"):
+                    t["routing_orphan_bus"] = True
+                    msgs = t.setdefault("routing_impact", [])
+                    msgs.append("orphan bus: bus-like track has no upstream sources")
+                    t["routing_break"] = True
+
+
+def _find_deactivated_paths(
+    by_id: Dict[str, Dict[str, Any]],
+    edges: Dict[str, List[str]],
+    tlabel: Callable[[str], str],
+    tsimple: Callable[[str], Dict[str, Any]]
+) -> None:
+    """
+    Multi-source BFS from deactivated tracks to compute depth and sources.
+    Annotates tracks in-place with routing_break_depth, routing_break_sources, and routing_break_path.
+    """
+    deact_sources: List[str] = [
+        tid for tid, t in by_id.items() if (t.get("flags") or {}).get("deactivated") is True
+    ]
+
+    # For each node: best_depth, and list of deactivated sources that achieve that best_depth
+    best_depth: Dict[str, int] = {}
+    best_sources: Dict[str, List[str]] = {}
+
+    # We keep a single exemplar predecessor chain for each node at its best depth.
+    # This lets us reconstruct one shortest path for reporting (routing_break_path).
+    best_pred: Dict[str, Optional[str]] = {}
+    best_pred_src: Dict[str, Optional[str]] = {}
+
+    q = deque()  # (node, depth, src, prev)
+    for sid in deact_sources:
+        q.append((sid, 0, sid, None))
+
+    while q:
+        node, depth, src, prev = q.popleft()
+
+        # record best depth/sources for this node
+        if node not in best_depth or depth < best_depth[node]:
+            best_depth[node] = depth
+            best_sources[node] = [src]
+            best_pred[node] = prev
+            best_pred_src[node] = src
+        elif depth == best_depth[node]:
+            if src not in best_sources[node]:
+                best_sources[node].append(src)
+            # Keep existing predecessor as exemplar; do not overwrite to avoid churn.
+        else:
+            # worse depth, skip expansion
+            continue
+
+        # expand
+        for nxt in edges.get(node, []):
+            nd = depth + 1
+            # prune if we already have a better depth for nxt
+            if nxt in best_depth and nd > best_depth[nxt]:
+                continue
+            q.append((nxt, nd, src, node))
+
+    # Attach depth/sources to tracks with routing breaks or deactivated sources
+    for tid, t in by_id.items():
+        if tid not in best_depth:
+            continue
+
+        # Always attach to deactivated sources (depth 0) for traceability
+        # Attach to others only if routing_break was triggered
+        if best_depth[tid] == 0 or t.get("routing_break") is True:
+            t["routing_break_depth"] = int(best_depth[tid])
+            srcs = best_sources.get(tid, [])
+            # Make sources stable + minimal
+            srcs2 = sorted(set(srcs), key=lambda x: int(x) if x.isdigit() else x)
+            t["routing_break_sources"] = [tsimple(s) for s in srcs2]
+
+            # Exemplar shortest path from a deactivated source to this track (for actionable debugging)
+            if tid in best_pred_src and best_pred_src.get(tid) is not None:
+                path_ids: List[str] = []
+                cur: Optional[str] = tid
+                guard = 0
+                while cur is not None and guard < 50:
+                    path_ids.append(cur)
+                    cur = best_pred.get(cur)
+                    guard += 1
+                path_ids.reverse()
+                # Limit to avoid bloat in pathological graphs
+                if len(path_ids) > MAX_PATH_IDS:
+                    path_ids = path_ids[:PATH_EDGE_ITEMS] + ["..."] + path_ids[-PATH_EDGE_ITEMS:]
+                t["routing_break_path"] = [tsimple(pid) if pid != "..." else {"id": "...", "name": "...", "type": "..."} for pid in path_ids]
+                t["routing_break_path_ids"] = path_ids
+
+            # If this track is not deactivated but reachable from deactivated sources,
+            # ensure routing_break is True (graph-derived)
+            if (t.get("flags") or {}).get("deactivated") is not True and best_depth[tid] >= 1:
+                t["routing_break"] = True
+                msgs = t.setdefault("routing_impact", [])
+                # avoid spamming; one line that references the closest sources
+                if srcs2:
+                    msgs.append(
+                        f"reachable from deactivated source(s) at depth {best_depth[tid]}: "
+                        + ", ".join([tlabel(s) for s in srcs2[:PATH_EDGE_ITEMS]])
+                        + ("..." if len(srcs2) > PATH_EDGE_ITEMS else "")
+                    )
 
 
 def apply_deactivated_routing_impact_checks(tracks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1859,7 +2151,7 @@ def apply_deactivated_routing_impact_checks(tracks: List[Dict[str, Any]]) -> Lis
     # --- (C) Dead bus / orphan bus detection ---
     # dead bus: has upstream sources, but ALL are deactivated
     # orphan bus: heuristic bus-like track with zero upstream sources at all
-    bus_name_rx = re.compile(r"(bus|return|fx|send|recv|receive)", re.IGNORECASE)
+    bus_name_rx = BUS_NAME_PATTERN
     for tid, t in by_id.items():
         inc = incoming.get(tid, [])
         if inc:
@@ -1898,7 +2190,6 @@ def apply_deactivated_routing_impact_checks(tracks: List[Dict[str, Any]]) -> Lis
     best_depth: Dict[str, int] = {}
     best_sources: Dict[str, List[str]] = {}
 
-    from collections import deque
     # We keep a single exemplar predecessor chain for each node at its best depth.
     # This lets us reconstruct one shortest path for reporting (routing_break_path).
     best_pred: Dict[str, Optional[str]] = {}
@@ -1957,8 +2248,8 @@ def apply_deactivated_routing_impact_checks(tracks: List[Dict[str, Any]]) -> Lis
                     guard += 1
                 path_ids.reverse()
                 # Limit to avoid bloat in pathological graphs
-                if len(path_ids) > 25:
-                    path_ids = path_ids[:5] + ["..."] + path_ids[-5:]
+                if len(path_ids) > MAX_PATH_IDS:
+                    path_ids = path_ids[:PATH_EDGE_ITEMS] + ["..."] + path_ids[-PATH_EDGE_ITEMS:]
                 t["routing_break_path"] = [tsimple(pid) if pid != "..." else {"id": "...", "name": "...", "type": "..."} for pid in path_ids]
                 t["routing_break_path_ids"] = path_ids
 
@@ -1971,8 +2262,8 @@ def apply_deactivated_routing_impact_checks(tracks: List[Dict[str, Any]]) -> Lis
                 if srcs2:
                     msgs.append(
                         f"reachable from deactivated source(s) at depth {best_depth[tid]}: "
-                        + ", ".join([tlabel(s) for s in srcs2[:5]])
-                        + ("..." if len(srcs2) > 5 else "")
+                        + ", ".join([tlabel(s) for s in srcs2[:PATH_EDGE_ITEMS]])
+                        + ("..." if len(srcs2) > PATH_EDGE_ITEMS else "")
                     )
 
     # Recompute final_qc now that routing annotations are known
@@ -2419,7 +2710,7 @@ def print_problem_summary(full: Dict[str, Any], tracks: List[Dict[str, Any]]) ->
     if fail_preview:
         print("")
         print("Failing tracks (preview):")
-        for it in fail_preview[:25]:
+        for it in fail_preview[:MAX_DISPLAYED_FAILURES]:
             nm = it.get("name") or ""
             tt = it.get("type") or ""
             reasons = "".join(it.get("reasons") or [])
@@ -2433,14 +2724,14 @@ def print_problem_summary(full: Dict[str, Any], tracks: List[Dict[str, Any]]) ->
         for t in tracks:
             if t.get("routing_break") is not True:
                 continue
-            if shown >= 25:
+            if shown >= MAX_DISPLAYED_FAILURES:
                 print("  ...")
                 break
             nm = t.get("name") or ""
             depth = t.get("routing_break_depth")
             srcs = t.get("routing_break_sources") or []
             src_names = [s.get("name") for s in srcs if isinstance(s, dict) and s.get("name")] 
-            src_names = [str(x) for x in src_names][:5]
+            src_names = [str(x) for x in src_names][:PATH_EDGE_ITEMS]
             extra = ""
             if t.get("routing_dead_bus") is True:
                 extra = " [DEAD BUS]"
