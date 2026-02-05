@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.26] - 2026-02-05
+### Fixed
+- Removed 71 lines of dead/unreachable code after return statement in detect_device_on_automation()
+- Fixed BFS performance bug: changed iter_with_depth() to use deque with popleft() instead of list with pop(0) for O(1) operations
+- Fixed type annotation mismatch: apply_deactivated_routing_impact_checks() now correctly declares return type as List[Dict[str, Any]]
+
+### Improved
+- Queue operations performance in device/track processing (O(n) → O(1))
+- Code quality and type safety
+
+---
+
 ## [1.0.25] - 2026-02-04
 ### Changed
 - Output filenames now end with .json (full/compact) instead of *.audit.json

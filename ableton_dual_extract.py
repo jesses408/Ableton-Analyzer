@@ -22,6 +22,7 @@ Notes:
 
 from __future__ import annotations
 
+from collections import deque
 import argparse
 import gzip
 import hashlib
@@ -33,7 +34,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-SCRIPT_VERSION = "1.0.25"
+SCRIPT_VERSION = "1.0.26"
 
 # -----------------------------
 # IO helpers
@@ -515,9 +516,9 @@ def iter_with_depth(root: ET.Element, max_depth: int) -> List[Tuple[ET.Element, 
     Returns list of (element, depth).
     """
     out: List[Tuple[ET.Element, int]] = []
-    q: List[Tuple[ET.Element, int]] = [(root, 0)]
+    q: deque = deque([(root, 0)])
     while q:
-        node, d = q.pop(0)
+        node, d = q.popleft()
         out.append((node, d))
         if d >= max_depth:
             continue
@@ -1526,79 +1527,6 @@ def detect_device_on_automation(device_elem: ET.Element, track_envelope_targets:
     return False
 
 
-    def subtree_has_event_points(ctx: ET.Element, limit: int = 1500) -> bool:
-        seen = 0
-        for n in ctx.iter():
-            seen += 1
-            if seen > limit:
-                break
-            if event_rx.search(n.tag or ""):
-                return True
-            if "Time" in n.attrib and ("Value" in n.attrib or "Manual" in n.attrib or "Amount" in n.attrib):
-                return True
-            if "Value" in n.attrib and (parse_float(n.attrib.get("Value")) is not None or parse_bool(n.attrib.get("Value")) is not None):
-                return True
-        return False
-
-    # (A) Device-subtree scan (rare, but cheap)
-    for node, depth in iter_with_depth(device_elem, max_depth=8):
-        if not node_mentions(env_rx, node):
-            continue
-        has_on_ref = any(node_mentions(on_rx, n2) for n2, _ in iter_with_depth(node, max_depth=10))
-        if not has_on_ref:
-            continue
-        if subtree_has_event_points(node):
-            return True
-
-    # (B) Track-level scan (common)
-    if track_elem is None:
-        return False
-
-    lom = extract_device_lom_id(device_elem)
-    if not lom:
-        # Without a device id anchor, avoid broad track-level scanning (too many false positives).
-        return False
-
-    needle = lom
-
-    for node, depth in iter_with_depth(track_elem, max_depth=12):
-        if not node_mentions(env_rx, node):
-            continue
-        # must have points
-        if not subtree_has_event_points(node):
-            continue
-
-        # must mention On-ish target somewhere
-        has_on_ref = any(node_mentions(on_rx, n2) for n2, _ in iter_with_depth(node, max_depth=12))
-        if not has_on_ref:
-            continue
-
-        # and must reference this device lom id somewhere in attrs/text/tag (anchor)
-        found_anchor = False
-        seen = 0
-        for n in node.iter():
-            seen += 1
-            if seen > 2000:
-                break
-            for k, v in (n.attrib or {}).items():
-                if isinstance(v, str) and needle in v:
-                    found_anchor = True
-                    break
-            if found_anchor:
-                break
-            if n.text and needle in n.text:
-                found_anchor = True
-                break
-            if needle in (n.tag or ""):
-                found_anchor = True
-                break
-
-        if found_anchor:
-            return True
-
-    return False
-
-
 def extract_devices(track_elem: ET.Element, max_params_per_device: int, mix_settings: bool) -> List[Dict[str, Any]]:
     devices: List[Dict[str, Any]] = []
 
@@ -1773,7 +1701,7 @@ def _extract_any_track_id_from_routing(s: Optional[str]) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def apply_deactivated_routing_impact_checks(tracks: List[Dict[str, Any]]) -> None:
+def apply_deactivated_routing_impact_checks(tracks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     REQUIRED feature:
       - Detect when a deactivated track breaks routing/bus chains.
